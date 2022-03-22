@@ -1,4 +1,4 @@
-aa#ifndef THREADS_SYNCH_H
+#ifndef THREADS_SYNCH_H
 #define THREADS_SYNCH_H
 
 #include <list.h>
