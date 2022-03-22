@@ -497,7 +497,7 @@ void
 calculate_priority (struct thread *t)
 {
   if (t != idle_thread)
-    t->priority = x_to_n_near (sub_xn (sub_xy(n_to_x(PRI_MAX), divide_xn (t->recent_cpu, 4)), t->nice * 2));  
+    t->priority = x_to_n_near (sub_xn (sub_xy (n_to_x(PRI_MAX), divide_xn (t->recent_cpu, 4)), t->nice * 2));  
 }
 
 /* Advanced scheduling에서 recent_cpu를 계산하는 function. */
@@ -505,7 +505,7 @@ void
 calculate_recent_cpu (struct thread *t)
 {
   if (t != idle_thread)
-    t->recent_cpu = add_xn (mult_xy (divide_xy (mult_xn (load_average ,2), add_xn (mult_xn (load_average ,2), 1)), t->recent_cpu), t->nice);
+    t->recent_cpu = add_xn (mult_xy (divide_xy (mult_xn (load_average, 2), add_xn (mult_xn (load_average, 2), 1)), t->recent_cpu), t->nice);
 }
 
 /* Advanced scheduling에서 load_average를 계산하는 function. */
