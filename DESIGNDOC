@@ -1,0 +1,330 @@
+            +--------------------+
+            |        EE 415      |
+            | PROJECT 1: THREADS |
+            |   DESIGN DOCUMENT  |
+            +--------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Seokbum Yoon <jing9044@kaist.ac.kr>
+Geonho Kim <kgh0720kgh@kaist.ac.kr>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+                 ALARM CLOCK
+                 ===========
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct or
+>> struct member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+static int64_t global_tick
+잠들어있는 스레드의 기상 시각(tick) 최솟값 저장
+
+static struct list sleep_list
+잠들게 될 스레드를 이 리스트에 저장
+
+---- ALGORITHMS ----
+
+>> A2: Briefly describe what happens in a call to timer_sleep(),
+>> including the effects of the timer interrupt handler.
+
+timer_sleep()은 지정한 시간만큼 current_thread를 sleep시키는 역할을 한다. timer_sleep()이 호출되면 내부에 있는 thread_sleep()이 호출되며 이 thread_sleep()에 의해 current_thread의 
+wakeup_tick은 지정한 tick 값으로 설정된 후 잠들게 된다. timer interrupt handler에 의해 timer_interrupt()가 호출될 때마다 해당 시각에 깨어날 thread가 있는지 점검하며, 깨어날 thread가 있다면
+thread_wakeup을 호출한다. thread_wakeup은 thread들을 깨워 ready_list에 다시 집어넣는다.
+
+>> A3: What steps are taken to minimize the amount of time spent in
+>> the timer interrupt handler?
+
+thread_sleep에서 thread를 재울 때마다  global_tick에 thread들의 깨어날 시각들의 최솟값을 저장한다. timer_interrupt에서는 매번 깨어날 thread가 있는지 체크하지 않고 현재 tick이 global_tick에
+도달했을 때 thread들을 체크함으로써 시간을 절약한다.
+
+---- SYNCHRONIZATION ----
+
+>> A4: How are race conditions avoided when multiple threads call
+>> timer_sleep() simultaneously?
+
+timer_sleep 내에 있는 thread_sleep이 실행될 때 interrupt가 disable 되어있는 동안 scheduling 및 sleep_list 관련 작업이 수행되게 하여 race conditions을 피할 수 있게 하였다.
+
+>> A5: How are race conditions avoided when a timer interrupt occurs
+>> during a call to timer_sleep()?
+
+A4에서 기술한 것처럼 주요 작업이 진행되는 동안에는 interrupt가 disable되어 race conditions를 피할 수 있다. 
+
+---- RATIONALE ----
+
+>> A6: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+
+처음에는 ready_list 내에서 자체적으로 sleep된 thread들과 ready 상태의 thread들을 앞뒤로 배치하여 깨어나게 될 thread는 다시 앞으로 보내주는 방식을 통해 하나의 list로 문제를 해결하는 방법을
+구상하여 봤지만, ready_list는 ready 상태의 thread만 있도록 정의되었다는 점과 sleep된 thread와 ready 상태의 thread 이 두 thread가 위치한 경계 또한 정하기 어렵다는 한계가 있었다. 이를 해결하기
+위해서 block 상태의 thread들을 담는 sleep_list를 추가해주었고, 이 두 list를 같이 운용함으로써 각 상태의 thread들의 분류와 thread의 상태 전환이 원활하게 진행될 수 있었다.
+
+             PRIORITY SCHEDULING
+             ===================
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+struct thread에 추가된 새로운 member
+
+(1) struct lock *wait_on_lock 
+: A.wait_on_lock은 thread A가 require했지만, 다른 thread가 이미 hold하고 있어 대기해야만 하는
+  lock의 주소를 저장하는 변수이다. 기다리는 lock이 없거나 원하는 lock을 acquire하게 되면 값은 
+  NULL이 된다.
+
+(2) struct list donations 
+: A.donations는 thread A에게 priority donation을 할 가능성이 있는 모든 thread를 모아놓은 list로,
+  이들 중 priority가 가장 높은 thread가 thread A에게 priority donation을 진행한다.
+
+(3) struct list_elem d_elem 
+: list donations에 insert할 때 활용되는 변수.
+
+(4) int original_priority 
+: priority donation이 진행되기 이전의 thread의 고유한 priority가 저장되어 있는 변수로,
+  lock을 release한 이후, 기존의 priority로 돌아올 때 활용된다.    
+
+>> B2: Explain the data structure used to track priority donation.
+>> Use ASCII art to diagram a nested donation.  (Alternately, submit a
+>> .png file.)
+
+B1에서 언급한 struct thread에 추가된 4개의 member들을 활용하여 priority donation을 진행한다.
+
+Thread A가 lock B에 대한 lock_acquire를 수행하면 다음의 절차를 밟는다.
+
+1. lock B가 사용 중인지 확인한다. (lock의 semaphore value 값이 0이면 사용 중, 1이면 미사용 중이므로 이를 통해 확인이 가능하다.)
+   사용 중이지 않으면 donation을 생략한다.
+
+2. Donation 과정 (thread C가 lock B를 사용 중이라 하자.) 
+  
+  1) thread A가 lock B의 release를 기다리고 있으므로 A.wait_on_lock에 lock B의 주소를 저장한다.
+  
+  2) C.donations에 A.d_elem을 priority 순으로 insert한다.
+     (여기서 thread A가 새롭게 추가된 것이 thread C뿐만 아니라 C와 연관된 다른 thread들의 priority에 연쇄적으로 영향(Nested Donation)을 미칠 수 있음에 주목하자.)          
+  
+  3) C.donations에서 priority가 가장 큰 원소에 해당하는 thread를 찾는다. 이 thread를 D라 하자. 
+  
+  4)-1 C의 priority가 D의 priority보다 작은 경우 
+    (1) priority inversion을 방지하기 위해 D의 priority를 C에게 donate한다.
+    (2) C의 priority가 변경되었으므로 Nested Donation이 발생할 수 있다. 따라서 C.wait_on_lock을 확인한다.
+        C.wait_on_lock에 해당하는 lock의 holder에 대해 3), 4)를 반복한다.
+        C.wait_on_lock이 NULL인 경우, 더 이상 Nested Donation이 진행될 가능성이 없으므로 donation을 중단한다.
+  
+  4)-2 C의 priority가 D의 priority보다 큰 경우 
+    (1) priority donation을 진행하지 않아도 되고, 따라서 C의 priority가 변경되지 않기 때문에 Nested Donation의 필요성 역시 없어지므로 donation을 중단한다.    
+
+3. Thread A가 추가되어 trigger된 donation이 끝났기 때문에, 이제 lock B가 release되어 A가 사용할 차례가 될 때까지 기다린다. (sema_down)
+
+4. Thread A의 차례가 되면 더 이상 기다리는 lock이 없으므로 A.wait_on_lock을 NULL로 설정한 후, lock B의 holder를 A로 설정한다.   
+
+Thread A가 lock B에 대한 lock_release를 수행하면 다음의 절차를 밟는다.
+
+1. A.donations의 원소들에 해당하는 thread들 중, lock B를 기다리고 있는 thread들(wait_on_lock = lock B의 주소값)은 더 이상 A의 priority에 영향을 줄 수 없게 된다.
+   따라서 이러한 원소들은 A.donation에서 제거한다.
+
+2. 1의 과정을 거치고 A.donations를 priority 순으로 sort를 진행한다.
+   (초기에 priority 순으로 insert하지만 priority donation으로 인해 순서가 뒤바뀔 수 있기 때문이다.)
+
+3. A.donations에서 priority가 가장 큰 원소에 해당하는 thread를 찾는다. 이 thread를 C라 하자. 
+   (priority 순으로 sort 했으므로 A.donation의 맨 앞 원소에 해당하는 thread가 priority가 가장 크다.)
+
+   1) A.original_priority가 C.priority보다 작은 경우 -> C의 priority를 A에게 donate한다.
+   2) A.original_priority가 C.priority보다 큰 경우 -> A는 원래의 priority로 돌아온다.
+
+(1, 2, 3을 통해 한 thread가 사용하는 lock들에 여러 thread가 대기하고 있을 때 발생하는 Muliple Donation을 수행할 수 있다.)
+
+4. lock B는 release되었으므로 lock B의 holder를 NULL로 만들고 lock B에 대한 sema_up을 진행한다. 
+
+위에서 서술한 내용을 바탕으로 B1에 기술한 data structure로 올바르게 donation을 track할 수 있음을 알 수 있다.
+
+<Nested Donation 예시> (thread A, B, C, lock X, Y) 
+
+                                                        acquire Y                                                release Y    end
+                                                            *                                                        *         *
+thread A     ---------------------------------------------------------------------------------|     p=63(hold Y)     ||  p=63  |-------------------------------------------------
+prioirty 
+= 63                   acquire Y    acquire X                                            release Y                                      release X      end
+                          *             *                                                    *                                              *           *
+thread B     -------------|p=31(hold Y)|-------------------------------------|p=63(hold X, Y)|---------------------------------|p=31(hold X)||   p=31   |------------------------
+prioirty 
+= 31      acquire X                    donate 31         donate 63       release X                                                                                end
+             *                            *                 *                *                                                                                     *
+thread C     |p=1(hold X)|----------------|  p=31(Hold X)  ||  p=63(Hold X)  |---------------------------------------------------------------------------|   p=1   |-------------
+prioirty 
+= 1
+
+
+---- ALGORITHMS ----
+
+>> B3: How do you ensure that the highest priority thread waiting for
+>> a lock, semaphore, or condition variable wakes up first?
+
+sema_down, sema_up에서 list_insert_ordered와 list_sort를 통해 waiters list가 priority 순으로 정렬된 상태를 유지시켰다.
+그리고 thread_unblock을 list의 앞에서부터 진행시켰기 때문에 semaphore를 기다리는 thread들이 priority 순서대로 wake up 되는 것을 확신할 수 있다.
+
+lock의 경우 semaphore에 종속적이기 떄문에 마찬가지로 올바르게 동작하며, condition variable 역시 cond_wait, cond_signal에서 waiters list에 포함된 semaphore들이
+'각 semaphore가 보유한 thread들의 priority 중 maximum값'이 큰 순서대로 정렬된 상태를 유지시켰기 때문에 역시 원하는 동작이 보장된다.
+
+>> B4: Describe the sequence of events when a call to lock_acquire()
+>> causes a priority donation.  How is nested donation handled?
+
+lock_acquire가 prioirty donation을 유발하려면 lock_acquire를 call한 thread의 priority가 lock을 사용중인 thread의 priority보다 커야한다.
+왜냐하면 이미 lock holder의 priority는 dontaions list에 있는 thread들의 priority 중 가장 큰 값으로 설정 되어있기 때문에 이에 변화를 주기 위해선  
+lock_acquire를 call한 thread의 priority가 lock holder의 priority보다 커야한다.
+(만약 크지 않다면, lock_acquire를 call한 thread는 prioirty 변화를 일으키지 못하고, Nested Donation 역시 발생하지 않는다.)
+
+이러한 조건에서 sequence는 다음과 같다.
+
+lock이 사용중인지 확인 
+-> lock 사용중 
+-> lock을 사용중인 thread의 priority와 lock_acquire를 call한 thread의 priority를 비교.
+-> 'lock holder의 priority = lock_acquire를 call한 thread의 priority' 로 donation 진행.
+-> lock holder의 priority가 증가했으므로 이에 따라 lock holder가 대기하고 있는 lock에 대해서도 연쇄적으로 donation 진행.
+-> 더 이상 진행될 수 없을 때까지, 즉, chain의 끝에 도달할 때까지 진행.
+-> sema_down, lock hold
+
+따라서 Nested Donation은 특정 thread가 lock_acquire를 call했을 때, 해당 lock과 관련이 있는 모든 thread들을
+data structure(wait_on_lock, donations, d_elem)를 활용하여 탐색한 후 조건에 맞게 B2에서 언급한 것 처럼 진행이 된다. 
+
+>> B5: Describe the sequence of events when lock_release() is called
+>> on a lock that a higher-priority thread is waiting for.
+
+B2에서 언급한 것과 동일하게 lock_release가 수행된다. 이후, sema_up을 통해 lock의 semaphore value가 1이 되고, 따라서 해당 lock을 대기하고 있는 thread들 중,
+priority가 높은 thread가 lock을 acquire 할 것이다. 
+
+---- SYNCHRONIZATION ----
+
+>> B6: Describe a potential race in thread_set_priority() and explain
+>> how your implementation avoids it.  Can you use a lock to avoid
+>> this race?
+
+thread A가 hold하고 있는 lock X를 대기하고 있는 thread B가 있다고 가정하자. (A.priority < B.priority)
+이러한 상황에서 thread A의 thread_set_priority와 thread B의 priority donation이 thread A의 priority에 대한 race를 형성할 수 있다.
+
+예를 들어, thread A에서 thread_set_priority가 실행되는 도중 interrupt가 발생하고, 이 때 thread B의 lock_acquire로 donation이 진행된다면 donation으로 변경된 A의 priority가
+다시 thread_set_priority로 변경될 수가 있다. 이런 경우 의도하지 않은 방향으로 프로그램이 실행될 수 있다. 따라서 thread_set_priority에서 interrupt를 disable하는 code를 추가하여
+문제를 해결하였다. 
+
+lock을 활용해서도 해결할 수 있다. priority donation을 고려하지 않는 일반적인 lock을 활용하면 된다. 
+thread A의 thread_set_priority 실행 이전에 새로운 lock Y를 acquire, 실행 이후에 lock Y를 release하도록 하고
+thread B의 lock_acquire에서 lock Y를 acquire하게 되면, thread A가 thread_set_priority가 수행될 때까지 lock Y를 hold하기 때문에
+thread B의 lock_acquire는 interrupt가 발생하더라도 lock Y를 획득할 수 없어 실행되지 않아 donation 역시 진행이 되지 않는다.
+이와 같은 방법으로 lock을 활용해서도 해결이 가능하다. 
+
+---- RATIONALE ----
+
+>> B7: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+
+처음에는 lock_acquire 함수의 priority donation 과정에서 lock holder의 donations list 내에 있는 thread들 중 priority가 가장 큰 thread를
+찾아서 이를 lock holder의 priority와 비교하여 donation 여부를 결정하였다.
+하지만, B4에서 언급한 것처럼 lock_acquire를 call한 thread의 priority를 lock holder의 priority와 비교하는 것으로도 충분하다는 사실을 확인하였고
+이를 통해 donations list에서 priority가 가장 큰 thread를 찾는 과정을 생략할 수 있었다.
+
+              ADVANCED SCHEDULER
+              ==================
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+int nice;                           /* nice값 저장. (정수) */
+int recent_cpu;                     /* recent_cpu값 저장. (fixed point로 표현된 실수) */
+int load_average;                   /* load_average값 저장. (fixed point로 표현된 실수) */
+
+---- ALGORITHMS ----
+
+>> C2: Suppose threads A, B, and C have nice values 0, 1, and 2.  Each
+>> has a recent_cpu value of 0.  Fill in the table below showing the
+>> scheduling decision and the priority and recent_cpu values for each
+>> thread after each given number of timer ticks:
+
+timer  recent_cpu    priority   thread
+ticks   A   B   C   A   B   C   to run
+-----  --  --  --  --  --  --   ------
+  0 |  0 | 0|  0| 63 | 61 | 59 | A |
+  4 |  4 | 0|  0| 62 | 61 | 59 | A |            
+  8 |  8 | 0|  0| 61 | 61 | 59 | B |            
+ 12 |  8 | 4|  0| 61 | 60 | 59 | A |            
+ 16 | 12 | 4|  0| 60 | 60 | 59 | B |           
+ 20 | 12 | 8|  0| 60 | 59 | 59 | A |        
+ 24 | 16 | 8|  0| 59 | 59 | 59 | C |    
+ 28 | 16 | 8|  4| 59 | 59 | 58 | B |  
+ 32 | 16 |12|  4| 59 | 58 | 58 | A | 
+ 36 | 20 |12|  4| 58 | 58 | 58 | C |
+
+>> C3: Did any ambiguities in the scheduler specification make values
+>> in the table uncertain?  If so, what rule did you use to resolve
+>> them?  Does this match the behavior of your scheduler?
+
+매 tick마다 recent_cpu가 update되는데, 4tick마다 priority를 update할 때 update된 recent_cpu의 값으로 계산할지 그 이전의 recent_cpu로 계산할지 모호하였다. 전자의 경우로 적용하여 계산하였고,
+scheduler를 만들 때에도 이와 같이 적용하였다.
+
+>> C4: How is the way you divided the cost of scheduling between code
+>> inside and outside interrupt context likely to affect performance?
+
+timer_interrupt 내에서 statistics들을 계산하는 데 소요되는 시간이 길어지면 enforced preemption의 존재로 인해 thread가 충분한 running time을 갖지 못할 수 있고, 이는 load_average와 cpu 증가로
+인한 priority 저하로 야기될 수 있다. 따라서 전반적인 performance 저하가 예상된다. 
+
+
+---- RATIONALE ----
+
+>> C5: Briefly critique your design, pointing out advantages and
+>> disadvantages in your design choices.  If you were to have extra
+>> time to work on this part of the project, how might you choose to
+>> refine or improve your design?
+
+우리가 구현한 디자인은 하나의 큐로만 운용되기에 구현하기 간편하고 priority를 통한 sorting이 쉽게 이루어진다. 따라서 이론적 배경을 익히고 코드를 작성하기까지 간단한 절차로 이루어졌다. 그러나 
+thread의 개수가 많아지면 sorting 과정에 따른 시간 복잡도에 의해 performance가 저하된다. 이때 multiple ready queues를 사용하게 된다면 priority에 따라 thread를 해당 queue에 배치시키므로
+sorting이 필요 없어져 performance를 개선할 수 있다. 만약 추가적인 시간이 생긴다면 multiple ready queues를 구현하여 이 문제점을 보완하고 싶다. 
+
+>> C6: The assignment explains arithmetic for fixed-point math in
+>> detail, but it leaves it open to you to implement it.  Why did you
+>> decide to implement it the way you did?  If you created an
+>> abstraction layer for fixed-point math, that is, an abstract data
+>> type and/or a set of functions or macros to manipulate fixed-point
+>> numbers, why did you do so?  If not, why not?
+
+Lecture note에서 다루었던 것처럼 kernel 내부에서의 계산에는 floating point register가 쓰이지 않아 소수점 밑 값을 저장할 수 없다. 따라서 1.2를 12로 간주하여 정수값으로 다룬다는 원리를 이용하여
+소수들의 값을 정수에 대응시키는 방법을 구현하였다. 이때 이 정수값을 원래의 소수값으로 다시 변환하는 과정과 그 반대의 과정, 변환된 정수끼리의 연산 등이 동일한 로직에 의해 계속 수행되므로 그때마다 
+수식을 작성하기보다는 이들을 처리하는 함수들을 자체적으로 정의하여 호출하는 방식을 사용하였다.
+
+               SURVEY QUESTIONS
+               ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
