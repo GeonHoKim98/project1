@@ -171,7 +171,8 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
-
+  thread_tick ();
+  
   if (thread_mlfqs)
   {
   /* 매 4 tick마다 priority recalculate & 1초마다 recent_cpu와 load_average recalculate. */
@@ -182,23 +183,19 @@ timer_interrupt (struct intr_frame *args UNUSED)
         calculate_load_average ();
         recalculate_recent_cpu ();
       }
-      else
+      else 
       {
         increase_cpu();
         recalculate_priority();
       }
-   }
-    else
-    {
-      increase_cpu();
     }
+    else
+      increase_cpu();   
   }
 
   /* wakeup_tick의 최소값(=global_tick)보다 현재의 tick이 크다. -> wake up 해야할 thread가 sleep_list에 존재한다! */
   if (return_global_tick () <= ticks)
     thread_wakeup (ticks);
-
-  thread_tick ();
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
