@@ -175,14 +175,15 @@ timer_interrupt (struct intr_frame *args UNUSED)
   
   if (thread_mlfqs)
   {
-  /* 매 4 tick마다 priority recalculate & 1초마다 recent_cpu와 load_average recalculate. */
-    if(ticks%4 == 0)
+    /* 매 4 tick마다 priority recalculate & 1초마다 recent_cpu와 load_average recalculate. */
+    if (ticks % 4 == 0)
     {
-      if(ticks%TIMER_FREQ == 0)
+      if (ticks % TIMER_FREQ == 0)
       {
         calculate_load_average ();
         recalculate_recent_cpu ();
       }
+      
       increase_cpu();
       recalculate_priority();
     }
