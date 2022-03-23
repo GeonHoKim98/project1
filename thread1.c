@@ -61,7 +61,6 @@ static int f = 1 << 14;
 
 /* load average(fixed point로 표현된 실수) */
 int load_average; 
-int num_ready;
 
 /* Scheduling. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
@@ -239,7 +238,6 @@ thread_block (void)
   ASSERT (intr_get_level () == INTR_OFF);
 
   thread_current ()->status = THREAD_BLOCKED;
-  num_ready--;
   schedule ();
 }
 
@@ -262,7 +260,6 @@ thread_unblock (struct thread *t)
   ASSERT (t->status == THREAD_BLOCKED);
   list_push_back (&ready_list[t->priority], &t->elem); // ready_list에 priority 순으로 insert한다.
   t->status = THREAD_READY;
-  num_ready++;
   intr_set_level (old_level);
 }
 
@@ -359,7 +356,6 @@ thread_sleep (int64_t ticks_to_wakeup)
         cur->status = THREAD_BLOCKED;
         cur->wakeup_tick = ticks_to_wakeup;
         list_push_back (&sleep_list, &cur->elem);  
-        num_ready--;
     }
     schedule ();
     intr_set_level (old_level);
@@ -400,7 +396,6 @@ thread_wakeup (int64_t cur_ticks)
         checking_thread_elem->next->prev = checking_thread_elem->prev;
         checking_thread_elem = checking_thread_elem->prev; 
         checking_thread->status = THREAD_READY;
-        num_ready++;
         list_push_back (&ready_list[checking_thread->priority], &checking_thread->elem);
       }
       else
@@ -495,10 +490,6 @@ thread_set_priority (int new_priority)
     else
       cur->priority = cur->original_priority;
 
-    if(cur->status == THREAD_READY){
-        list_remove(&cur->elem);
-        list_push_back(&ready_list[cur->priority],&cur->elem);
-    }
     /* 새로 설정된 priority가 ready_list의 head thread의 priority
      보다 작을 수 있으므로, cmp_cur_begin_priority를 수행한다. */
     cmp_cur_begin_priority ();
@@ -512,7 +503,9 @@ calculate_priority (struct thread *t)
 {
   if (t != idle_thread)
   {
-    t->priority = x_to_n_near (sub_xn (sub_xy (n_to_x(PRI_MAX), divide_xn (t->recent_cpu, 4)), t->nice * 2));  
+    t->priority = x_to_n_near (sub_xn (sub_xy (n_to_x(PRI_MAX), divide_xn (t->recent_cpu, 4)), t->nice * 2)); 
+    if(t->priority <0) t->priority = 0;
+    if(t->priority >PRI_MAX) t->priority = PRI_MAX; 
     if(t->status == THREAD_READY){
     list_remove(&t->elem);
     list_push_back(&ready_list[t->priority],&t->elem);
@@ -533,9 +526,11 @@ void
 calculate_load_average (void)
 {
   struct thread *cur = thread_current ();
-  int ready_threads = list_size(&all_list)-list_size(&sleep_list);
-  if (cur == idle_thread)
-    ready_threads -= 1;
+  int ready_threads = 0, i;
+  for(i = 0 ; i <= PRI_MAX ; i++)
+  ready_threads += list_size(&ready_list[i]);
+  if (cur != idle_thread)
+    ready_threads += 1;
   load_average = add_xy (divide_xy ( mult_xy (n_to_x (59), load_average), n_to_x (60)), divide_xy ( mult_xn (n_to_x (1), ready_threads), n_to_x (60))); 
 }
 
