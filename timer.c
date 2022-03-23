@@ -183,11 +183,8 @@ timer_interrupt (struct intr_frame *args UNUSED)
         calculate_load_average ();
         recalculate_recent_cpu ();
       }
-      else 
-      {
-        increase_cpu();
-        recalculate_priority();
-      }
+      increase_cpu();
+      recalculate_priority();
     }
     else
       increase_cpu();   
