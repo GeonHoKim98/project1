@@ -1,179 +1,268 @@
-#ifndef THREADS_THREAD_H
-#define THREADS_THREAD_H
-
+#include "devices/timer.h"
 #include <debug.h>
-#include <list.h>
-#include <stdint.h>
+#include <inttypes.h>
+#include <round.h>
+#include <stdio.h>
+#include "devices/pit.h"
+#include "threads/interrupt.h"
+#include "threads/synch.h"
+#include "threads/thread.h"
+  
+/* See [8254] for hardware details of the 8254 timer chip. */
 
-/* States in a thread's life cycle. */
-enum thread_status
-  {
-    THREAD_RUNNING,     /* Running thread. */
-    THREAD_READY,       /* Not running but ready to run. */
-    THREAD_BLOCKED,     /* Waiting for an event to trigger. */
-    THREAD_DYING        /* About to be destroyed. */
-  };
-
-/* Thread identifier type.
-   You can redefine this to whatever type you like. */
-typedef int tid_t;
-#define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
-
-/* Thread priorities. */
-#define PRI_MIN 0                       /* Lowest priority. */
-#define PRI_DEFAULT 31                  /* Default priority. */
-#define PRI_MAX 63                      /* Highest priority. */
-
-/* A kernel thread or user process.
-
-   Each thread structure is stored in its own 4 kB page.  The
-   thread structure itself sits at the very bottom of the page
-   (at offset 0).  The rest of the page is reserved for the
-   thread's kernel stack, which grows downward from the top of
-   the page (at offset 4 kB).  Here's an illustration:
-
-        4 kB +---------------------------------+
-             |          kernel stack           |
-             |                |                |
-             |                |                |
-             |                V                |
-             |         grows downward          |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             +---------------------------------+
-             |              magic              |
-             |                :                |
-             |                :                |
-             |               name              |
-             |              status             |
-        0 kB +---------------------------------+
-
-   The upshot of this is twofold:
-
-      1. First, `struct thread' must not be allowed to grow too
-         big.  If it does, then there will not be enough room for
-         the kernel stack.  Our base `struct thread' is only a
-         few bytes in size.  It probably should stay well under 1
-         kB.
-
-      2. Second, kernel stacks must not be allowed to grow too
-         large.  If a stack overflows, it will corrupt the thread
-         state.  Thus, kernel functions should not allocate large
-         structures or arrays as non-static local variables.  Use
-         dynamic allocation with malloc() or palloc_get_page()
-         instead.
-
-   The first symptom of either of these problems will probably be
-   an assertion failure in thread_current(), which checks that
-   the `magic' member of the running thread's `struct thread' is
-   set to THREAD_MAGIC.  Stack overflow will normally change this
-   value, triggering the assertion. */
-/* The `elem' member has a dual purpose.  It can be an element in
-   the run queue (thread.c), or it can be an element in a
-   semaphore wait list (synch.c).  It can be used these two ways
-   only because they are mutually exclusive: only a thread in the
-   ready state is on the run queue, whereas only a thread in the
-   blocked state is on a semaphore wait list. */
-struct thread
-  {
-    /* Owned by thread.c. */
-    tid_t tid;                          /* Thread identifier. */
-    enum thread_status status;          /* Thread state. */
-    char name[63];                      /* Name (for debugging purposes). */
-    uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
-    struct list_elem allelem;           /* List element for all threads list. */
-    int64_t wakeup_tick;                /* wake up을 해야하는 시점. */
-    struct lock *wait_on_lock;          /* Require한 lock의 주소. */
-    struct list donations;              /* Priority donate를 해준 thread들의 list. */
-    struct list_elem d_elem;            /* donations의 원소. */
-    int original_priority;              /* donate를 받기 전 priority 저장. */
-    int nice;                           /* advanced scheduling을 위한 nice값 저장. (정수) */
-    int recent_cpu;                     /* advanced scheduling을 위한 recent_cpu값 저장. (fixed point로 표현된 실수) */
-    int64_t latency_tick;               /* latency check를 위한 variable */
-
-    /* Shared between thread.c and synch.c. */
-    struct list_elem elem;              /* List element. */
-
-#ifdef USERPROG
-    /* Owned by userprog/process.c. */
-    uint32_t *pagedir;                  /* Page directory. */
+#if TIMER_FREQ < 19
+#error 8254 timer requires TIMER_FREQ >= 19
+#endif
+#if TIMER_FREQ > 1000
+#error TIMER_FREQ <= 1000 recommended
 #endif
 
-    /* Owned by thread.c. */
-    unsigned magic;                     /* Detects stack overflow. */
-  };
+/* Number of timer ticks since OS booted. */
+static int64_t ticks;
 
-/* If false (default), use round-robin scheduler.
-   If true, use multi-level feedback queue scheduler.
-   Controlled by kernel command-line option "-o mlfqs". */
-extern bool thread_mlfqs;
-extern bool thread_report_latency;
+/* Number of loops per timer tick.
+   Initialized by timer_calibrate(). */
+static unsigned loops_per_tick;
 
-void thread_init (void);
-void thread_start (void);
+static intr_handler_func timer_interrupt;
+static bool too_many_loops (unsigned loops);
+static void busy_wait (int64_t loops);
+static void real_time_sleep (int64_t num, int32_t denom);
+static void real_time_delay (int64_t num, int32_t denom);
 
-void thread_tick (void);
-void thread_print_stats (void);
+/* Sets up the timer to interrupt TIMER_FREQ times per second,
+   and registers the corresponding interrupt. */
+void
+timer_init (void) 
+{
+  pit_configure_channel (0, 2, TIMER_FREQ);
+  intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+}
 
-typedef void thread_func (void *aux);
-tid_t thread_create (const char *name, int priority, thread_func *, void *);
+/* Calibrates loops_per_tick, used to implement brief delays. */
+void
+timer_calibrate (void) 
+{
+  unsigned high_bit, test_bit;
 
-void thread_block (void);
-void thread_unblock (struct thread *);
+  ASSERT (intr_get_level () == INTR_ON);
+  printf ("Calibrating timer...  ");
 
-struct thread *thread_current (void);
-tid_t thread_tid (void);
-const char *thread_name (void);
+  /* Approximate loops_per_tick as the largest power-of-two
+     still less than one timer tick. */
+  loops_per_tick = 1u << 10;
+  while (!too_many_loops (loops_per_tick << 1)) 
+    {
+      loops_per_tick <<= 1;
+      ASSERT (loops_per_tick != 0);
+    }
 
-void thread_exit (void) NO_RETURN;
-void thread_yield (void);
+  /* Refine the next 8 bits of loops_per_tick. */
+  high_bit = loops_per_tick;
+  for (test_bit = high_bit >> 1; test_bit != high_bit >> 10; test_bit >>= 1)
+    if (!too_many_loops (loops_per_tick | test_bit))
+      loops_per_tick |= test_bit;
 
-/* 새롭게 추가된 함수 */
-void thread_sleep (int64_t ticks_for_wakeup);
-void save_global_tick (int64_t ticks);
-void thread_wakeup (int64_t cur_ticks);
-int64_t return_global_tick (void);
+  printf ("%'"PRIu64" loops/s.\n", (uint64_t) loops_per_tick * TIMER_FREQ);
+}
 
-bool cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux);
-bool cmp_priority_for_d (const struct list_elem *a, const struct list_elem *b, void *aux);
-void cmp_cur_begin_priority (void);
+/* Returns the number of timer ticks since the OS booted. */
+int64_t
+timer_ticks (void) 
+{
+  enum intr_level old_level = intr_disable ();
+  int64_t t = ticks;
+  intr_set_level (old_level);
+  return t;
+}
 
-void calculate_priority (struct thread *t);
-void calculate_recent_cpu (struct thread *t);
-void calculate_load_average (void);
-void increase_cpu (void);
-void recalculate_priority (void);
-void recalculate_recent_cpu (void);
+/* Returns the number of timer ticks elapsed since THEN, which
+   should be a value once returned by timer_ticks(). */
+int64_t
+timer_elapsed (int64_t then) 
+{
+  return timer_ticks () - then;
+}
 
-int n_to_x (int n);
-int x_to_n_zero (int x);
-int x_to_n_near (int x);
-int add_xy (int x, int y);
-int sub_xy (int x, int y);
-int add_xn (int x, int n);
-int sub_xn (int x, int n);
-int mult_xy (int x, int y);
-int mult_xn (int x, int n);
-int divide_xy (int x, int y);
-int divide_xn (int x, int n);
+/* Sleeps for approximately TICKS timer ticks.  Interrupts must
+   be turned on. */
+void
+timer_sleep (int64_t ticks) 
+{
+  int64_t start = timer_ticks ();
 
-/* Performs some operation on thread t, given auxiliary data AUX. */
-typedef void thread_action_func (struct thread *t, void *aux);
-void thread_foreach (thread_action_func *, void *);
+  ASSERT (intr_get_level () == INTR_ON);
+  
+  thread_sleep (start + ticks); //thread의 wakeup_tick을 start + ticks로 설정 후, sleep_list로 이동.
+}
 
-int thread_get_priority (void);
-void thread_set_priority (int);
+/* Sleeps for approximately MS milliseconds.  Interrupts must be
+   turned on. */
+void
+timer_msleep (int64_t ms) 
+{
+  real_time_sleep (ms, 1000);
+}
 
-int thread_get_nice (void);
-void thread_set_nice (int);
-int thread_get_recent_cpu (void);
-int thread_get_load_avg (void);
+/* Sleeps for approximately US microseconds.  Interrupts must be
+   turned on. */
+void
+timer_usleep (int64_t us) 
+{
+  real_time_sleep (us, 1000 * 1000);
+}
 
-#endif /* threads/thread.h */
+/* Sleeps for approximately NS nanoseconds.  Interrupts must be
+   turned on. */
+void
+timer_nsleep (int64_t ns) 
+{
+  real_time_sleep (ns, 1000 * 1000 * 1000);
+}
+
+/* Busy-waits for approximately MS milliseconds.  Interrupts need
+   not be turned on.
+
+   Busy waiting wastes CPU cycles, and busy waiting with
+   interrupts off for the interval between timer ticks or longer
+   will cause timer ticks to be lost.  Thus, use timer_msleep()
+   instead if interrupts are enabled. */
+void
+timer_mdelay (int64_t ms) 
+{
+  real_time_delay (ms, 1000);
+}
+
+/* Sleeps for approximately US microseconds.  Interrupts need not
+   be turned on.
+
+   Busy waiting wastes CPU cycles, and busy waiting with
+   interrupts off for the interval between timer ticks or longer
+   will cause timer ticks to be lost.  Thus, use timer_usleep()
+   instead if interrupts are enabled. */
+void
+timer_udelay (int64_t us) 
+{
+  real_time_delay (us, 1000 * 1000);
+}
+
+/* Sleeps execution for approximately NS nanoseconds.  Interrupts
+   need not be turned on.
+
+   Busy waiting wastes CPU cycles, and busy waiting with
+   interrupts off for the interval between timer ticks or longer
+   will cause timer ticks to be lost.  Thus, use timer_nsleep()
+   instead if interrupts are enabled.*/
+void
+timer_ndelay (int64_t ns) 
+{
+  real_time_delay (ns, 1000 * 1000 * 1000);
+}
+
+/* Prints timer statistics. */
+void
+timer_print_stats (void) 
+{
+  printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
+}
+
+/* Timer interrupt handler. */
+static void
+timer_interrupt (struct intr_frame *args UNUSED)
+{
+  ticks++;
+  thread_tick ();
+  
+  if (thread_mlfqs)
+  {
+    /* 매 4 tick마다 priority recalculate & 1초마다 recent_cpu와 load_average recalculate. */
+    if (ticks % 4 == 0)
+    {
+      if (ticks % TIMER_FREQ == 0)
+      {
+        calculate_load_average ();
+        recalculate_recent_cpu ();
+      }
+      
+      increase_cpu();
+      recalculate_priority();
+    }
+    else
+      increase_cpu();   
+  }
+
+  /* wakeup_tick의 최소값(=global_tick)보다 현재의 tick이 크다. -> wake up 해야할 thread가 sleep_list에 존재한다! */
+  if (return_global_tick () <= ticks)
+    thread_wakeup (ticks);
+}
+
+/* Returns true if LOOPS iterations waits for more than one timer
+   tick, otherwise false. */
+static bool
+too_many_loops (unsigned loops) 
+{
+  /* Wait for a timer tick. */
+  int64_t start = ticks;
+  while (ticks == start)
+    barrier ();
+
+  /* Run LOOPS loops. */
+  start = ticks;
+  busy_wait (loops);
+
+  /* If the tick count changed, we iterated too long. */
+  barrier ();
+  return start != ticks;
+}
+
+/* Iterates through a simple loop LOOPS times, for implementing
+   brief delays.
+
+   Marked NO_INLINE because code alignment can significantly
+   affect timings, so that if this function was inlined
+   differently in different places the results would be difficult
+   to predict. */
+static void NO_INLINE
+busy_wait (int64_t loops) 
+{
+  while (loops-- > 0)
+    barrier ();
+}
+
+/* Sleep for approximately NUM/DENOM seconds. */
+static void
+real_time_sleep (int64_t num, int32_t denom) 
+{
+  /* Convert NUM/DENOM seconds into timer ticks, rounding down.
+          
+        (NUM / DENOM) s          
+     ---------------------- = NUM * TIMER_FREQ / DENOM ticks. 
+     1 s / TIMER_FREQ ticks
+  */
+  int64_t ticks = num * TIMER_FREQ / denom;
+
+  ASSERT (intr_get_level () == INTR_ON);
+  if (ticks > 0)
+    {
+      /* We're waiting for at least one full timer tick.  Use
+         timer_sleep() because it will yield the CPU to other
+         processes. */                
+      timer_sleep (ticks); 
+    }
+  else 
+    {
+      /* Otherwise, use a busy-wait loop for more accurate
+         sub-tick timing. */
+      real_time_delay (num, denom); 
+    }
+}
+
+/* Busy-wait for approximately NUM/DENOM seconds. */
+static void
+real_time_delay (int64_t num, int32_t denom)
+{
+  /* Scale the numerator and denominator down by 1000 to avoid
+     the possibility of overflow. */
+  ASSERT (denom % 1000 == 0);
+  busy_wait (loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000)); 
+}
