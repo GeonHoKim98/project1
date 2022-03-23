@@ -16,6 +16,8 @@ Geonho Kim <kgh0720kgh@kaist.ac.kr>
 >> If you have any preliminary comments on your submission, notes for the
 >> TAs, or extra credit, please give them here.
 
+extra credit을 위해 multiple ready queue를 구현하였습니다. 확인부탁드립니다.
+
 >> Please cite any offline or online sources you consulted while
 >> preparing your submission, other than the Pintos documentation, course
 >> text, lecture notes, and course staff.
@@ -278,10 +280,6 @@ scheduler를 만들 때에도 이와 같이 적용하였다.
 
 >> C4: How is the way you divided the cost of scheduling between code
 >> inside and outside interrupt context likely to affect performance?
-
-timer_interrupt 내에서 statistics들을 계산하는 데 소요되는 시간이 길어지면 enforced preemption의 존재로 인해 thread가 충분한 running time을 갖지 못할 수 있고, 이는 load_average와 cpu 증가로
-인한 priority 저하로 야기될 수 있다. 따라서 전반적인 performance 저하가 예상된다. 
-
 
 ---- RATIONALE ----
 
